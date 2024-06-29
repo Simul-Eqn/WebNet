@@ -1,52 +1,268 @@
 import torch 
 import torch.nn as nn 
 
-
+# TODO: Is some form of attention useful? 
 
 class WebNet(nn.Module):
-    def __init__(self, total_nodes:int, output_nodes:list, activation=nn.ReLU(), 
-                 output_memory=0.95, ): 
+    normalize = True 
+    def __init__(self, input_nodes:int, hidden_nodes:int, output_nodes:int, 
+                 update_fn = lambda v, inv: inv, h_has_self_weights=True): 
         # output_nodes must be sorted, 0-indexed. 
-        # output_memory means how much output node values gets retained 
+        # update_fn decides how to update. Default means it doesn't retain past info and it 
+        #   just becomes the input, which makes this like an MLP. A custom input could make it 
+        #   have an activation function like nn.ReLU()(inv), but it offers more flexibility. 
+        # h_has_self_weights decides if h_to_h diagonal is all 0 or has weights. True means retains info. 
         super(WebNet, self).__init__() 
 
-        self.total_nodes = total_nodes 
+        self.input_nodes = input_nodes 
+        self.hidden_nodes = hidden_nodes 
         self.output_nodes = output_nodes 
+        self.update_fn = update_fn 
+        self.h_has_self_weights = h_has_self_weights 
 
-        self.params = [] 
-        output_nodes_idx = 0 
-        for i in range(total_nodes): 
-            if (i == output_nodes[output_nodes_idx]): 
-                # since it's an output node, it doesn't affect other nodes 
-                t = torch.zeros((total_nodes, 1)) 
-                t[i][0] = output_memory 
-                self.params.append(nn.Parameter(t, requires_grad=False))
-                output_nodes_idx += 1 
-            else: 
-                self.params.append(nn.Parameter(torch.rand((total_nodes, 1)), requires_grad=True)) 
+        # TODO: initialize it differently to work better e.g. similar to linear RNN https://arxiv.org/abs/2303.06349 
+        # this makes it avoid vanishing/exploding gradient problem 
+        # normalize weights or smtg perhaps too 
+        self.i_to_h = nn.Parameter(torch.rand((hidden_nodes, input_nodes))) 
+        self.h_to_h = nn.Parameter(torch.rand((hidden_nodes, hidden_nodes))) 
+        self.i_to_o = nn.Parameter(torch.rand((output_nodes, input_nodes))) 
+        self.h_to_o = nn.Parameter(torch.rand((output_nodes, hidden_nodes)))
 
-        self.activation = activation 
+        self.check_self_weights() 
+        if WebNet.normalize: self.normalize_weights() 
+
+    def check_self_weights(self): 
+        if not self.h_has_self_weights: 
+            # set h_to_h diagonal to None 
+            self.h_to_h.data.fill_diagonal_(0) 
+            if WebNet.normalize: self.normalize_weights() 
     
-    def forward(self, x):
-        if (len(x.shape)==3): n = x.shape[0]
-        else: n = 1
+    def normalize_weights(self): # can force normalize if wanted 
+        # TODO: NORMALIZE WEIGHTS 
+        pass 
 
-        # pass through graph + activation fn 
-        x = torch.cat(self.params, dim=1) @ x 
-        x = self.activation(x)
-        
-        # batch normalization: 
-        x = self.total_nodes*x/(x.sum()/n) 
-        return x 
+
+    def forward(self, i:torch.Tensor, h:torch.Tensor, o:torch.Tensor):
+        # i=None just means no input 
+        if i is None: 
+            inh = self.h_to_h @ h 
+            ino = self.h_to_o @ o 
+        else: 
+            inh = (self.i_to_h @ i) + (self.h_to_h @ h) # input into h 
+            ino = (self.i_to_o @ i) + (self.h_to_o @ h) # input into o 
+
+        return self.update_fn(h, inh), self.update_fn(o, ino)
 
 # input size: (?, total_nodes, 1) where ? is the batch size.
 
+
+class LSTMWebNet(nn.Module):
+    normalize = False 
+
+    def __init__(self, n_input_nodes:int, n_hidden_nodes:int, n_output_nodes:int, h_has_self_weights=False, 
+                 batch_first=True, h_cell_state_size=None, o_cell_state_size=None, cell_state_size=4, share_lstm=True, 
+                 in_aggregation = lambda from_i, from_h: from_i + from_h, in_activation=nn.ReLU(), lstm_activation=nn.ReLU() ): 
+        # output_nodes must be sorted, 0-indexed. 
+        # if share_lstm == False, then h_cell and o_cell default to cell 
+        # if share_lstm == True, then all is just 1 lstm no separate h_cell and o_cell, just cell 
+        # NOTE: if share_lstm == True, consider setting lstm learning rate  a lot lower, since it's backpropagated (n_hidden_hodes + n_output_nodes)
+        super(LSTMWebNet, self).__init__() 
+
+        if (not share_lstm) and (h_cell_state_size is None): 
+            h_cell_state_size = cell_state_size 
+        if (not share_lstm) and (o_cell_state_size is None): 
+            o_cell_state_size = cell_state_size 
+
+        self.n_input_nodes = n_input_nodes 
+        self.n_hidden_nodes = n_hidden_nodes 
+        self.n_output_nodes = n_output_nodes 
+        self.in_aggregation = in_aggregation 
+        self.in_activation = in_activation 
+        self.lstm_activation = lstm_activation 
+        self.h_has_self_weights = h_has_self_weights 
+        self.share_lstm = share_lstm 
+        if share_lstm: 
+            self.cell_state_size = cell_state_size 
+        else: 
+            self.h_cell_state_size = h_cell_state_size 
+            self.o_cell_state_size = o_cell_state_size
+        self.batch_first = batch_first 
+
+        # TODO: is rand the best way to initialize parameters? 
+        self.i_to_h = nn.Parameter(torch.rand((n_hidden_nodes, n_input_nodes))) 
+        self.h_to_h = nn.Parameter(torch.rand((n_hidden_nodes, n_hidden_nodes))) 
+        self.i_to_o = nn.Parameter(torch.rand((n_output_nodes, n_input_nodes))) 
+        self.h_to_o = nn.Parameter(torch.rand((n_output_nodes, n_hidden_nodes)))
+
+        self.check_self_weights() # only works if h_has_self_weights = False 
+        if LSTMWebNet.normalize: self.normalize_weights() 
+
+        if share_lstm: 
+            self.lstm = nn.LSTM(1, cell_state_size, batch_first=batch_first, proj_size=1)
+        else: 
+            self.hs = [nn.LSTM(1, h_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_hidden_nodes)] 
+            self.os = [nn.LSTM(1, o_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_output_nodes)] 
+
+    def get_lstm_params(self): 
+        if self.share_lstm: 
+            return self.lstm.parameters() 
+        else: 
+            def hs_os_generator(): 
+                for hidx in range(len(self.hs)): 
+                    params = self.hs[hidx].parameters() 
+                    try: 
+                        yield next(params) 
+                    except Exception: 
+                        continue 
+                for oidx in range(len(self.os)): 
+                    params = self.os[oidx].parameters() 
+                    try: 
+                        yield next(params) 
+                    except Exception: 
+                        continue 
+                
+            return hs_os_generator() 
+
+    
+    def check_self_weights(self): 
+        if not self.h_has_self_weights: 
+            # set h_to_h diagonal to None 
+            self.h_to_h.data.fill_diagonal_(0) 
+            if LSTMWebNet.normalize: self.normalize_weights() 
+    
+    def normalize_weights(self): # can force normalize if wanted 
+        # TODO: NORMALIZE WEIGHTS 
+        pass 
+
+
+    def get_h_cell_shape(self, batch_size:int=None): 
+        # batch_size = None means unbatched, else it's batched. 
+        if (batch_size == None): 
+            return (1, self.h_cell_state_size) 
+        return (1, batch_size, self.h_cell_state_size) 
+    
+    def h_cells_zeros(self, batch_size:int=None): 
+        s = self.get_h_cell_shape(batch_size) 
+        return [torch.zeros(s) for _ in range(self.n_hidden_nodes)] 
+    
+
+    def get_o_cell_shape(self, batch_size:int=None): 
+        # batch_size = None means unbatched, else it's batched. 
+        if (batch_size == None): 
+            return (1, self.o_cell_state_size) 
+        return (1, batch_size, self.o_cell_state_size) 
+    
+    def o_cells_zeros(self, batch_size:int=None): 
+        s = self.get_o_cell_shape(batch_size) 
+        return [torch.zeros(s) for _ in range(self.n_output_nodes)] 
+    
+
+    def forward(self, i:torch.Tensor, h:torch.Tensor, o:torch.Tensor, 
+                h_cells:list[torch.Tensor], o_cells:list[torch.Tensor]):
+        # i=None just means no input 
+        if i is None: 
+            inh = self.h_to_h @ h 
+            ino = self.h_to_o @ o 
+        else: 
+            inh = self.in_aggregation( (self.i_to_h @ i) , (self.h_to_h @ h) ) # input into h 
+            ino = self.in_aggregation( (self.i_to_o @ i) , (self.h_to_o @ h) ) # input into o 
+
+        inh = self.in_activation(inh) 
+        ino = self.in_activation(ino) 
+
+        batched = len(i.shape)>2 
+        
+        if self.share_lstm: lstm = self.lstm 
+        if batched: 
+            if self.batch_first: 
+                h_outs = [] 
+                h_cell_outs = [] 
+                for hidx in range(self.n_hidden_nodes): 
+                    if not self.share_lstm: 
+                        lstm = self.hs[hidx]
+
+                    h_out, (_, h_cell_out) = lstm(inh[:, hidx:hidx+1, :].transpose(1,2), 
+                                    (h[:, hidx:hidx+1, :].transpose(0,2).transpose(1,2), h_cells[hidx])) 
+                    h_outs.append(h_out.transpose(1,2)) 
+                    h_cell_outs.append(h_cell_out) 
+                new_h = torch.cat(h_outs, dim=1) 
+                
+                o_outs = [] 
+                o_cell_outs = [] 
+                for oidx in range(self.n_output_nodes): 
+                    if not self.share_lstm: 
+                        lstm = self.os[oidx]
+
+                    o_out, (_, o_cell_out) = lstm(ino[:, oidx:oidx+1, :].transpose(1,2), 
+                                    (o[:, oidx:oidx+1, :].transpose(0,2).transpose(1,2), o_cells[oidx])) 
+                    o_outs.append(o_out.transpose(1,2)) 
+                    o_cell_outs.append(o_cell_out) 
+                new_o = torch.cat(o_outs, dim=1) 
+
+            else: 
+                h_outs = [] 
+                h_cell_outs = [] 
+                for hidx in range(self.n_hidden_nodes): 
+                    if not self.share_lstm: 
+                        lstm = self.hs[hidx]
+
+                    h_out, (_, h_cell_out) = lstm(inh[hidx:hidx+1, :, :].transpose(1,2), 
+                                    (h[hidx:hidx+1, :, :].transpose(1,2), h_cells[hidx])) 
+                    h_outs.append(h_out.transpose(1,2)) 
+                    h_cell_outs.append(h_cell_out) 
+                new_h = torch.cat(h_outs, dim=1) 
+                
+                o_outs = [] 
+                o_cell_outs = [] 
+                for oidx in range(self.n_output_nodes): 
+                    if not self.share_lstm: 
+                        lstm = self.os[oidx]
+
+                    o_out, (_, o_cell_out) = lstm(ino[oidx:oidx+1, :, :].transpose(1,2), 
+                                    (o[oidx:oidx+1, :, :].transpose(1,2), o_cells[oidx])) 
+                    o_outs.append(o_out.transpose(1,2)) 
+                    o_cell_outs.append(o_cell_out) 
+                new_o = torch.cat(o_outs, dim=1) 
+        
+        else: 
+            h_outs = [] 
+            h_cell_outs = [] 
+            for hidx in range(self.n_hidden_nodes): 
+                if not self.share_lstm: 
+                        lstm = self.hs[hidx]
+
+                h_out, (_, h_cell_out) = lstm(inh[hidx:hidx+1, :].transpose(0,1), 
+                                (h[hidx:hidx+1, :].transpose(0,1), h_cells[hidx])) 
+                h_outs.append(h_out.transpose(0,1)) 
+                h_cell_outs.append(h_cell_out) 
+            new_h = torch.cat(h_outs, dim=0) 
+            
+            o_outs = [] 
+            o_cell_outs = [] 
+            for oidx in range(self.n_output_nodes): 
+                if not self.share_lstm: 
+                        lstm = self.os[oidx]
+
+                o_out, (_, o_cell_out) = lstm(ino[oidx:oidx+1, :].transpose(0,1), 
+                                (o[oidx:oidx+1, :].transpose(0,1), o_cells[oidx])) 
+                o_outs.append(o_out.transpose(0,1)) 
+                o_cell_outs.append(o_cell_out) 
+            new_o = torch.cat(o_outs, dim=0) 
+            
+
+        return self.lstm_activation(new_h), self.lstm_activation(new_o), h_cell_outs, o_cell_outs 
+
+
+
+
 batch_size = 3 
-inputs = 30 
-hiddens = 68 
+inputs = 10 
+hiddens = 88 
 outputs = 2 
 
-wn = WebNet(inputs+hiddens+outputs, list(range(inputs+hiddens, inputs+hiddens+outputs)))
+wn = WebNet(inputs, hiddens, outputs)
 
-x = torch.cat([torch.rand((batch_size, inputs, 1)) , torch.zeros((3, hiddens+outputs, 1)) ], dim=1) 
+i0 = torch.rand((batch_size, inputs, 1)) # this just for testing 
+h = torch.zeros((batch_size, hiddens, 1)) 
+o = torch.zeros((batch_size, outputs, 1)) 
 
