@@ -60,17 +60,18 @@ class LSTMWebNet(nn.Module):
     normalize = False 
 
     def __init__(self, n_input_nodes:int, n_hidden_nodes:int, n_output_nodes:int, h_has_self_weights=False, 
-                 batch_first=True, h_cell_state_size=None, o_cell_state_size=None, cell_state_size=4, share_lstm=True, 
+                 batch_first=True, h_cell_state_size=None, o_cell_state_size=None, cell_state_size=4, 
+                 h_share_lstm=True, o_share_lstm=True, all_share_lstm=False, 
                  in_aggregation = lambda from_i, from_h: from_i + from_h, in_activation=nn.ReLU(), lstm_activation=nn.ReLU() ): 
         # output_nodes must be sorted, 0-indexed. 
-        # if share_lstm == False, then h_cell and o_cell default to cell 
-        # if share_lstm == True, then all is just 1 lstm no separate h_cell and o_cell, just cell 
-        # NOTE: if share_lstm == True, consider setting lstm learning rate  a lot lower, since it's backpropagated (n_hidden_hodes + n_output_nodes)
+        # if all the _share_lstm == False, then h_cell and o_cell default to cell 
+        # if all_share_lstm == True, then all is just 1 lstm no separate h_cell and o_cell, just cell 
+        # NOTE: if any _share_lstm == True, consider setting lstm learning rate  a lot lower, since it's backpropagated (n_hidden_hodes + n_output_nodes)
         super(LSTMWebNet, self).__init__() 
 
-        if (not share_lstm) and (h_cell_state_size is None): 
+        if (not h_share_lstm) and (not all_share_lstm) and (h_cell_state_size is None): 
             h_cell_state_size = cell_state_size 
-        if (not share_lstm) and (o_cell_state_size is None): 
+        if (not o_share_lstm) and (not all_share_lstm) and (o_cell_state_size is None): 
             o_cell_state_size = cell_state_size 
 
         self.n_input_nodes = n_input_nodes 
@@ -80,10 +81,18 @@ class LSTMWebNet(nn.Module):
         self.in_activation = in_activation 
         self.lstm_activation = lstm_activation 
         self.h_has_self_weights = h_has_self_weights 
-        self.share_lstm = share_lstm 
-        if share_lstm: 
+
+        
+        self.all_share_lstm = all_share_lstm 
+        if all_share_lstm: 
             self.cell_state_size = cell_state_size 
+            self.h_cell_state_size = cell_state_size 
+            self.o_cell_state_size = cell_state_size
+            self.h_share_lstm = False 
+            self.o_share_lstm = False 
         else: 
+            self.h_share_lstm = h_share_lstm 
+            self.o_share_lstm = o_share_lstm 
             self.h_cell_state_size = h_cell_state_size 
             self.o_cell_state_size = o_cell_state_size
         self.batch_first = batch_first 
@@ -97,31 +106,73 @@ class LSTMWebNet(nn.Module):
         self.check_self_weights() # only works if h_has_self_weights = False 
         if LSTMWebNet.normalize: self.normalize_weights() 
 
-        if share_lstm: 
+        if all_share_lstm: 
             self.lstm = nn.LSTM(1, cell_state_size, batch_first=batch_first, proj_size=1)
         else: 
-            self.hs = [nn.LSTM(1, h_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_hidden_nodes)] 
-            self.os = [nn.LSTM(1, o_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_output_nodes)] 
+            if h_share_lstm: 
+                self.h_lstm = nn.LSTM(1, h_cell_state_size, batch_first=batch_first, proj_size=1) 
+            else: 
+                self.hs = [nn.LSTM(1, h_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_hidden_nodes)] 
+            
+            if o_share_lstm: 
+                self.o_lstm = nn.LSTM(1, o_cell_state_size, batch_first=batch_first, proj_size=1)
+            else: 
+                self.os = [nn.LSTM(1, o_cell_state_size, batch_first=batch_first, proj_size=1) for _ in range(n_output_nodes)] 
+
+    def get_h_lstm_params(self): 
+        if self.all_share_lstm: 
+            return self.lstm.parameters() 
+        
+        if self.h_share_lstm: 
+            return self.h_lstm.parameters() 
+            
+        def hs_generator(): 
+            for hidx in range(len(self.hs)): 
+                params = self.hs[hidx].parameters() 
+                while True: 
+                    try: 
+                        yield next(params) 
+                    except Exception: 
+                        break 
+        return hs_generator() 
+    
+    def get_o_lstm_params(self): 
+        if self.all_share_lstm: 
+            return self.lstm.parameters()
+        
+        if self.o_share_lstm: 
+            return self.o_lstm.parameters() 
+
+        def os_generator(): 
+            for oidx in range(len(self.os)): 
+                params = self.os[oidx].parameters() 
+                while True: 
+                    try: 
+                        yield next(params) 
+                    except Exception: 
+                        break  
+        return os_generator() 
 
     def get_lstm_params(self): 
-        if self.share_lstm: 
+        if self.all_share_lstm: 
             return self.lstm.parameters() 
-        else: 
-            def hs_os_generator(): 
-                for hidx in range(len(self.hs)): 
-                    params = self.hs[hidx].parameters() 
-                    try: 
-                        yield next(params) 
-                    except Exception: 
-                        continue 
-                for oidx in range(len(self.os)): 
-                    params = self.os[oidx].parameters() 
-                    try: 
-                        yield next(params) 
-                    except Exception: 
-                        continue 
-                
-            return hs_os_generator() 
+
+        def hs_os_generator(): 
+            hs_gen = self.get_h_lstm_params() 
+            while True: 
+                try: 
+                    yield next(hs_gen) 
+                except Exception: 
+                    break 
+            
+            os_gen = self.get_o_lstm_params() 
+            while True: 
+                try: 
+                    yield next(os_gen) 
+                except Exception: 
+                    break 
+
+        return hs_os_generator() 
 
     
     def check_self_weights(self): 
@@ -156,7 +207,7 @@ class LSTMWebNet(nn.Module):
         s = self.get_o_cell_shape(batch_size) 
         return [torch.zeros(s) for _ in range(self.n_output_nodes)] 
     
-
+    #                  input values    hidden values  output values 
     def forward(self, i:torch.Tensor, h:torch.Tensor, o:torch.Tensor, 
                 h_cells:list[torch.Tensor], o_cells:list[torch.Tensor]):
         # i=None just means no input 
@@ -167,18 +218,21 @@ class LSTMWebNet(nn.Module):
             inh = self.in_aggregation( (self.i_to_h @ i) , (self.h_to_h @ h) ) # input into h 
             ino = self.in_aggregation( (self.i_to_o @ i) , (self.h_to_o @ h) ) # input into o 
 
-        inh = self.in_activation(inh) 
-        ino = self.in_activation(ino) 
+        inh = self.in_activation(inh) # input to hiddens 
+        ino = self.in_activation(ino) # input to outputs 
 
         batched = len(i.shape)>2 
         
-        if self.share_lstm: lstm = self.lstm 
+        # run the input through the hiddens and outputs' lstms 
+        if self.all_share_lstm: lstm = self.lstm 
         if batched: 
             if self.batch_first: 
+                # settle hiddens 
+                if self.h_share_lstm: lstm = self.h_lstm 
                 h_outs = [] 
                 h_cell_outs = [] 
                 for hidx in range(self.n_hidden_nodes): 
-                    if not self.share_lstm: 
+                    if (not self.all_share_lstm) and (not self.h_share_lstm): 
                         lstm = self.hs[hidx]
 
                     h_out, (_, h_cell_out) = lstm(inh[:, hidx:hidx+1, :].transpose(1,2), 
@@ -187,10 +241,12 @@ class LSTMWebNet(nn.Module):
                     h_cell_outs.append(h_cell_out) 
                 new_h = torch.cat(h_outs, dim=1) 
                 
+                # settle outs 
+                if self.o_share_lstm: lstm = self.o_lstm 
                 o_outs = [] 
                 o_cell_outs = [] 
                 for oidx in range(self.n_output_nodes): 
-                    if not self.share_lstm: 
+                    if (not self.all_share_lstm) and (not self.o_share_lstm): 
                         lstm = self.os[oidx]
 
                     o_out, (_, o_cell_out) = lstm(ino[:, oidx:oidx+1, :].transpose(1,2), 
@@ -200,10 +256,12 @@ class LSTMWebNet(nn.Module):
                 new_o = torch.cat(o_outs, dim=1) 
 
             else: 
+                # settle hiddens 
+                if self.h_share_lstm: lstm = self.h_lstm 
                 h_outs = [] 
                 h_cell_outs = [] 
                 for hidx in range(self.n_hidden_nodes): 
-                    if not self.share_lstm: 
+                    if (not self.all_share_lstm) and (not self.h_share_lstm): 
                         lstm = self.hs[hidx]
 
                     h_out, (_, h_cell_out) = lstm(inh[hidx:hidx+1, :, :].transpose(1,2), 
@@ -212,10 +270,12 @@ class LSTMWebNet(nn.Module):
                     h_cell_outs.append(h_cell_out) 
                 new_h = torch.cat(h_outs, dim=1) 
                 
+                # settle outs 
+                if self.o_share_lstm: lstm = self.o_lstm 
                 o_outs = [] 
                 o_cell_outs = [] 
                 for oidx in range(self.n_output_nodes): 
-                    if not self.share_lstm: 
+                    if (not self.all_share_lstm) and (not self.o_share_lstm): 
                         lstm = self.os[oidx]
 
                     o_out, (_, o_cell_out) = lstm(ino[oidx:oidx+1, :, :].transpose(1,2), 
@@ -225,11 +285,13 @@ class LSTMWebNet(nn.Module):
                 new_o = torch.cat(o_outs, dim=1) 
         
         else: 
+            # settle hiddens 
+            if self.h_share_lstm: lstm = self.h_lstm 
             h_outs = [] 
             h_cell_outs = [] 
             for hidx in range(self.n_hidden_nodes): 
-                if not self.share_lstm: 
-                        lstm = self.hs[hidx]
+                if (not self.all_share_lstm) and (not self.h_share_lstm): 
+                    lstm = self.hs[hidx]
 
                 h_out, (_, h_cell_out) = lstm(inh[hidx:hidx+1, :].transpose(0,1), 
                                 (h[hidx:hidx+1, :].transpose(0,1), h_cells[hidx])) 
@@ -237,11 +299,13 @@ class LSTMWebNet(nn.Module):
                 h_cell_outs.append(h_cell_out) 
             new_h = torch.cat(h_outs, dim=0) 
             
+            # settle outs 
+            if self.o_share_lstm: lstm = self.o_lstm 
             o_outs = [] 
             o_cell_outs = [] 
             for oidx in range(self.n_output_nodes): 
-                if not self.share_lstm: 
-                        lstm = self.os[oidx]
+                if (not self.all_share_lstm) and (not self.o_share_lstm): 
+                    lstm = self.os[oidx]
 
                 o_out, (_, o_cell_out) = lstm(ino[oidx:oidx+1, :].transpose(0,1), 
                                 (o[oidx:oidx+1, :].transpose(0,1), o_cells[oidx])) 
@@ -250,19 +314,21 @@ class LSTMWebNet(nn.Module):
             new_o = torch.cat(o_outs, dim=0) 
             
 
-        return self.lstm_activation(new_h), self.lstm_activation(new_o), h_cell_outs, o_cell_outs 
+        #     input to hiddens at next step; input to next step outputs; hidden memory; output memory 
+        return self.lstm_activation(new_h), self.lstm_activation(new_o), h_cell_outs, o_cell_outs  
 
 
 
+if __name__ == "__main__": 
 
-batch_size = 3 
-inputs = 10 
-hiddens = 88 
-outputs = 2 
+    batch_size = 3 
+    inputs = 10 
+    hiddens = 88 
+    outputs = 2 
 
-wn = WebNet(inputs, hiddens, outputs)
+    wn = WebNet(inputs, hiddens, outputs)
 
-i0 = torch.rand((batch_size, inputs, 1)) # this just for testing 
-h = torch.zeros((batch_size, hiddens, 1)) 
-o = torch.zeros((batch_size, outputs, 1)) 
+    i0 = torch.rand((batch_size, inputs, 1)) # this just for testing 
+    h = torch.zeros((batch_size, hiddens, 1)) 
+    o = torch.zeros((batch_size, outputs, 1)) 
 
