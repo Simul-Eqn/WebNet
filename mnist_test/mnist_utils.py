@@ -34,7 +34,7 @@ class MNISTDatasetHandler():
 
 class MultipleMNISTGenerator(): 
 
-    default_final_size = (256, 256) 
+    default_final_size = (260, 260) 
     default_size_range = ((28,28), (56,56)) # inclusive 
 
     min_gap = 4 
@@ -91,6 +91,9 @@ class MultipleMNISTGenerator():
             bboxes.append(bbox) # ltrb format 
 
         return out_img, bboxes 
+
+    def get_empty_image(self): 
+        return Image.new('L', self.final_size, 0) 
 
 
 if __name__=='__main__': 
