@@ -6,25 +6,55 @@ from torchvision import transforms
 torch.manual_seed(100) 
 torch.cuda.manual_seed(100) 
 
-from efficientnet_pytorch import EfficientNet 
+from efficientnet_pytorch.model import EfficientNet 
+from efficientnet_pytorch.utils import round_filters 
 
 from mnist_utils import MultipleMNISTGenerator 
 
 
 class EfficientNetExtractor(nn.Module): 
     default_in_size = MultipleMNISTGenerator.default_final_size[0] * MultipleMNISTGenerator.default_final_size[1] 
-    def __init__(self, in_size=None, out_size=1000, save_dir='./enet_extractor/'): 
+    def __init__(self, in_size=None, out_size=1000, save_dir='./enet_extractor/', batched:bool=True): 
+
+        nn.Module.__init__(self) 
         
         if in_size is None: in_size = EfficientNetExtractor.default_in_size 
         self.in_size = in_size 
         self.out_size = out_size 
         self.save_dir = save_dir 
+        self.batched = batched 
 
         self.efficientnet = EfficientNet.from_name('efficientnet-b2', in_channels=1) # out: 1000 
-        self.dense = nn.Linear(in_features=1000, out_features=out_size) 
-    
+        self.dense = nn.Linear(in_features=16000, out_features=out_size) 
+
+        if not batched: 
+            self.efficientnet._bn0 = nn.InstanceNorm2d(num_features = round_filters(32, self.efficientnet._global_params), 
+                                                       momentum = 1 - self.efficientnet._global_params.batch_norm_momentum, 
+                                                       eps = self.efficientnet._global_params.batch_norm_epsilon) 
+            
+            self.efficientnet._bn1 = nn.InstanceNorm2d(num_features = round_filters(1280, self.efficientnet._global_params), 
+                                                       momentum = 1 - self.efficientnet._global_params.batch_norm_momentum, 
+                                                       eps = self.efficientnet._global_params.batch_norm_epsilon) 
+            
+            for block in self.efficientnet._blocks: 
+                oup = block._block_args.input_filters * block._block_args.expand_ratio 
+                if block._block_args.expand_ratio != 1: 
+                    block._bn0 = nn.InstanceNorm2d(num_features = oup, momentum = block._bn_mom, eps = block._bn_eps) 
+                block._bn1 = nn.InstanceNorm2d(num_features = oup, momentum = block._bn_mom, eps = block._bn_eps)
+                block._bn2 = nn.InstanceNorm2d(num_features = block._block_args.output_filters, momentum = block._bn_mom, eps = block._bn_eps) 
+
+
+            # testing 
+            #print("BATCHED:", batched) 
+            #print(self.efficientnet._bn0) 
+            #print(self.efficientnet._bn1) 
+            #for block in self.efficientnet._blocks: 
+            #    print(block) 
+                
+
+
     def forward(self, img): 
-        return self.dense(self.efficientnet(img)) 
+        return self.dense(self.efficientnet(img).flatten()) 
     
     def save(self, save_dir=None): 
         if save_dir is None: save_dir = self.save_dir 

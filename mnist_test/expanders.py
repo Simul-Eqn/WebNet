@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn 
 
 class LinearsExpander(nn.Module): 
-    def __init__(self, in_size:int, hidden_sizes:list[int], out_shape:tuple[int], activations=nn.ReLU() ): 
+    def __init__(self, in_size:int, hidden_sizes:list[int], out_shape:tuple[int], activations=nn.Sigmoid() ): 
+
+        nn.Module.__init__(self) 
+
         # activations can be a list 
         out_size = 1 
         for s in out_shape: out_size *= s 
@@ -22,7 +25,7 @@ class LinearsExpander(nn.Module):
         self.out_shape = out_shape 
         self.activations = activations 
     
-    def forward(self, x): 
+    def forward(self, x, to_img_shape=False): 
         if type(self.activations) is list: 
             for lidx in range(len(self.layers)): 
                 x = self.layers[lidx](x) 
@@ -32,7 +35,10 @@ class LinearsExpander(nn.Module):
                 x = layer(x) 
                 x = self.activations(x) 
         out_shape = list(x.shape)[:-1] + list(self.out_shape) # in case it's batched 
-        return x.reshape(out_shape) 
+
+        if to_img_shape: 
+            return x.reshape(out_shape) 
+        return x 
 
             
 

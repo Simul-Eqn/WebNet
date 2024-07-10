@@ -236,7 +236,12 @@ class LSTMWebNet(nn.Module):
         inh = self.in_activation(inh) # input to hiddens 
         ino = self.in_activation(ino) # input to outputs 
 
-        batched = len(i.shape)>1 
+        #print(inh) 
+        #print("INH SHAPE:", inh.shape)
+        #print(ino) 
+        #print("INO SHAPE:", ino.shape) 
+
+        batched = len(h.shape)>1 
         
         # run the input through the hiddens and outputs' lstms 
         if self.all_share_lstm: lstm = self.lstm 
@@ -309,7 +314,7 @@ class LSTMWebNet(nn.Module):
                     lstm = self.os[oidx]
 
                 o_out, (_, o_cell_out) = lstm(ino[oidx:oidx+1].reshape((1,1)), 
-                                (o[oidx:oidx+1, :].reshape((1,1)), o_cells[oidx])) 
+                                (o[oidx:oidx+1].reshape((1,1)), o_cells[oidx])) 
                 o_outs.append(o_out.reshape(1)) 
                 o_cell_outs.append(o_cell_out) 
             new_o = torch.cat(o_outs, dim=0) 
