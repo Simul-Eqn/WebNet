@@ -1,6 +1,8 @@
 import torch 
 import torch.nn as nn 
 
+from concurrent.futures import ThreadPoolExecutor 
+
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 # TODO: Is some form of attention useful? 
@@ -127,12 +129,12 @@ class LSTMWebNet(nn.Module):
             if h_share_lstm: 
                 self.h_lstm = nn.LSTM(1, h_cell_state_size, proj_size=1, device=device) 
             else: 
-                self.hs = ModuleList([nn.LSTM(1, h_cell_state_size, proj_size=1, device=device) for _ in range(n_hidden_nodes)]) 
+                self.hs = nn.ModuleList([nn.LSTM(1, h_cell_state_size, proj_size=1, device=device) for _ in range(n_hidden_nodes)]) 
             
             if o_share_lstm: 
                 self.o_lstm = nn.LSTM(1, o_cell_state_size, proj_size=1, device=device)
             else: 
-                self.os = ModuleList([nn.LSTM(1, o_cell_state_size, proj_size=1, device=device) for _ in range(n_output_nodes)]) 
+                self.os = nn.ModuleList([nn.LSTM(1, o_cell_state_size, proj_size=1, device=device) for _ in range(n_output_nodes)]) 
     
     def get_non_lstm_params(self): 
         def params_generator(): 
@@ -286,15 +288,34 @@ class LSTMWebNet(nn.Module):
         
         # run the input through the hiddens and outputs' lstms 
         if self.all_share_lstm: lstm = self.lstm 
+        else: lstm=None
         if batched: 
             # settle hiddens 
             if self.h_share_lstm: lstm = self.h_lstm 
             h_outs = [] 
             h_cell_outs = [] 
-            for hidx in range(self.n_hidden_nodes): 
+
+            def settle_hidx(hidx, lstm): 
                 if (not self.all_share_lstm) and (not self.h_share_lstm): 
                     lstm = self.hs[hidx]
 
+                h_out, (_, h_cell_out) = lstm(inh[:, hidx:hidx+1].reshape((1,-1,1)), 
+                                (h[:, hidx:hidx+1].reshape((1,-1,1)), h_cells[hidx])) 
+                
+                if self.batch_first: 
+                    h_outs.append(h_out.reshape((-1,1))) 
+                else: 
+                    h_outs.append(h_out.reshape((1,-1))) 
+                h_cell_outs.append(h_cell_out) 
+            
+            with ThreadPoolExecutor() as executor: 
+                for hidx in range(self.n_hidden_nodes): 
+                    executor.submit(settle_hidx, hidx, lstm)
+            
+            '''
+            for hidx in range(self.n_hidden_nodes): 
+                if (not self.all_share_lstm) and (not self.h_share_lstm): 
+                    lstm = self.hs[hidx]
 
                 h_out, (_, h_cell_out) = lstm(inh[:, hidx:hidx+1].reshape((1,-1,1)), 
                                 (h[:, hidx:hidx+1].reshape((1,-1,1)), h_cells[hidx])) 
@@ -303,17 +324,20 @@ class LSTMWebNet(nn.Module):
                 else: 
                     h_outs.append(h_out.reshape((1,-1))) 
                 h_cell_outs.append(h_cell_out) 
+            ''' 
             
             if self.batch_first: 
                 new_h = torch.cat(h_outs, dim=1) 
             else: 
                 new_h = torch.cat(h_outs, dim=0)
             
+            
             # settle outs 
             if self.o_share_lstm: lstm = self.o_lstm 
             o_outs = [] 
             o_cell_outs = [] 
-            for oidx in range(self.n_output_nodes): 
+
+            def setle_oidx(oidx, lstm): 
                 if (not self.all_share_lstm) and (not self.o_share_lstm): 
                     lstm = self.os[oidx]
 
@@ -324,6 +348,10 @@ class LSTMWebNet(nn.Module):
                 else: 
                     o_outs.append(o_out.reshape((1,-1))) 
                 o_cell_outs.append(o_cell_out) 
+
+            with ThreadPoolExecutor() as executor: 
+                for oidx in range(self.n_output_nodes): 
+                    executor.submit(settle_oidx, oidx, lstm)
 
             if self.batch_first: 
                 new_o = torch.cat(o_outs, dim=1) 
@@ -336,7 +364,8 @@ class LSTMWebNet(nn.Module):
             if self.h_share_lstm: lstm = self.h_lstm 
             h_outs = [] 
             h_cell_outs = [] 
-            for hidx in range(self.n_hidden_nodes): 
+            
+            def settle_hidx(hidx, lstm): 
                 if (not self.all_share_lstm) and (not self.h_share_lstm): 
                     lstm = self.hs[hidx]
 
@@ -344,13 +373,20 @@ class LSTMWebNet(nn.Module):
                                 (h[hidx:hidx+1].reshape((1,1)), h_cells[hidx])) 
                 h_outs.append(h_out.reshape(1)) 
                 h_cell_outs.append(h_cell_out) 
+
+            with ThreadPoolExecutor() as executor: 
+                for hidx in range(self.n_hidden_nodes): 
+                    executor.submit(settle_hidx, hidx, lstm) 
+
             new_h = torch.cat(h_outs, dim=0) 
+
             
             # settle outs 
             if self.o_share_lstm: lstm = self.o_lstm 
             o_outs = [] 
             o_cell_outs = [] 
-            for oidx in range(self.n_output_nodes): 
+            
+            def settle_oidx(oidx, lstm): 
                 if (not self.all_share_lstm) and (not self.o_share_lstm): 
                     lstm = self.os[oidx]
 
@@ -358,6 +394,11 @@ class LSTMWebNet(nn.Module):
                                 (o[oidx:oidx+1].reshape((1,1)), o_cells[oidx])) 
                 o_outs.append(o_out.reshape(1)) 
                 o_cell_outs.append(o_cell_out) 
+
+            with ThreadPoolExecutor() as executor: 
+                for oidx in range(self.n_output_nodes): 
+                    executor.submit(settle_oidx, oidx, lstm)
+            
             new_o = torch.cat(o_outs, dim=0) 
             
 

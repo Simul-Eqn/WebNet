@@ -3,18 +3,20 @@ import os
 import torch 
 import torch.nn as nn 
 from torchvision import transforms 
-torch.manual_seed(100) 
-torch.cuda.manual_seed(100) 
+torch.manual_seed(10) 
+torch.cuda.manual_seed(10) 
 
 from efficientnet_pytorch.model import EfficientNet 
 from efficientnet_pytorch.utils import round_filters 
 
 from mnist_utils import MultipleMNISTGenerator 
 
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
 
 class EfficientNetExtractor(nn.Module): 
     default_in_size = MultipleMNISTGenerator.default_final_size[0] * MultipleMNISTGenerator.default_final_size[1] 
-    def __init__(self, in_size=None, out_size=1000, save_dir='./enet_extractor/', batched:bool=True): 
+    def __init__(self, in_size=None, out_size=1000, save_dir='./enet_extractor/', batched:bool=True, device=device): 
 
         nn.Module.__init__(self) 
         
@@ -24,8 +26,8 @@ class EfficientNetExtractor(nn.Module):
         self.save_dir = save_dir 
         self.batched = batched 
 
-        self.efficientnet = EfficientNet.from_name('efficientnet-b2', in_channels=1) # out: 1000 
-        self.dense = nn.Linear(in_features=16000, out_features=out_size) 
+        self.efficientnet = EfficientNet.from_name('efficientnet-b2', in_channels=1).to(device) # out: 1000 
+        self.dense = nn.Linear(in_features=16000, out_features=out_size, device=device) 
 
         if not batched: 
             self.efficientnet._bn0 = nn.InstanceNorm2d(num_features = round_filters(32, self.efficientnet._global_params), 
