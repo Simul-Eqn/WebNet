@@ -1,6 +1,6 @@
 path = './test1/' 
 episode_count = 10000 
-n_hiddens = 5000 
+n_hiddens = 2000 
 allowed_targets = list(range(9)) 
 allowed_digits = list(range(10))
 batch_size = 1 # 1 means unbatched 
@@ -20,6 +20,7 @@ sys.path.insert(1, os.path.join(sys.path[0],'../'))
 import torch 
 import torch.nn as nn 
 from torchvision import transforms 
+import numpy as np 
 
 from mnist_utils import MultipleMNISTGenerator 
 from extractors import EfficientNetExtractor 
@@ -37,8 +38,8 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 imgsize = MultipleMNISTGenerator.default_final_size 
 mnistgen = MultipleMNISTGenerator() 
 
-n_inputs = 1000 
-n_outputs = 1000 
+n_inputs = 300 
+n_outputs = 300 
 
 extractor = EfficientNetExtractor(imgsize, n_inputs, os.path.join(path, 'extractor'), batched=(batch_size!=1), device=device) 
 lwn = LSTMWebNet(n_inputs, n_hiddens, n_outputs, device=device).to(device) 
@@ -51,12 +52,12 @@ tfm = transforms.ToTensor() # TODO: perhaps more augmentation?
 
 
 optimizer = torch.optim.Adam([
-    {'params': extractor.parameters(), 'lr': 1e-8}, 
-    {'params': lwn.get_non_lstm_params(), 'lr': 1e-8}, 
-    {'params': lwn.get_lstm_params(), 'lr': 2e-13}, 
-    {'params': expander.parameters(), 'lr': 1e-8}, 
+    {'params': extractor.parameters(), 'lr': 1e2}, 
+    {'params': lwn.get_non_lstm_params(), 'lr': 1e2}, 
+    {'params': lwn.get_lstm_params(), 'lr': 2e-3}, 
+    {'params': expander.parameters(), 'lr': 1e2}, 
 ])
-
+loss_factor = 1#000000 # increase loss so that gradients will be larger 
  
 
 for episode in range(episode_count): 
@@ -84,6 +85,7 @@ for episode in range(episode_count):
 
 
     empty_bceloss = nn.BCELoss(reduction='mean') 
+    no_reduction_bceloss = nn.BCELoss(reduction='none') 
 
     
     ''' 
@@ -101,23 +103,53 @@ for episode in range(episode_count):
 
     losses = [] # keep track of scalar losses to report average loss 
 
-    optimizer.zero_grad() 
-    torch.cuda.empty_cache()
+    
+    print("EPISODE", episode)
+    debug = (episode%100 == 0) or (episode < 6) 
+    
 
-    # single episode 
+    # start delay 
     for i in range(start_delay): 
+        optimizer.zero_grad() 
+        torch.cuda.empty_cache()
+
+        if debug: 
+            print("START DELAY", i)
         img = tfm(mnistgen.get_empty_image()).to(device) 
 
         in_emb = extractor(img) 
-        #print("IN EMB SHPE:", in_emb.shape)
         h, o, h_c, o_c = lwn(in_emb, h, o, h_c, o_c) 
         out = expander(o, to_img_shape=False) 
 
         loss = empty_bceloss(out, torch.zeros_like(out))  # since it's all supposed to be 0. 
-        loss.backward(retain_graph=True) # not updating weights yet, just adding to gradients 
+        loss = loss*loss_factor 
+
+        # make copy 
+        h = h.detach().clone() 
+        o = o.detach().clone() 
+        h_c = [i.detach().clone() for i in h_c] 
+        o_c = [i.detach().clone() for i in o_c] 
+  
+
+        loss.backward() 
         
         losses.append(loss.item()) 
         del loss 
+
+        if debug: 
+            #print(losses[-1])
+            print("GRADS:", np.abs(extractor.dense.weight.grad.cpu().numpy().mean()) 
+                , np.abs(expander.layers[0].weight.grad.cpu().numpy().mean())
+                , np.abs(expander.layers[-1].weight.grad.cpu().numpy().mean()) )
+
+        optimizer.step() 
+
+        '''if debug: 
+            optimizer.zero_grad()
+            #print(losses[-1])
+            print("ZERO GRADS:", np.abs(extractor.dense.weight.grad.cpu().numpy().mean()) 
+                , np.abs(expander.layers[0].weight.grad.cpu().numpy().mean())
+                , np.abs(expander.layers[-1].weight.grad.cpu().numpy().mean()) )'''
 
         torch.cuda.empty_cache()
 
@@ -125,6 +157,11 @@ for episode in range(episode_count):
 
     # show target 
     for i in range(target_display): 
+        optimizer.zero_grad() 
+        torch.cuda.empty_cache()
+
+        if debug: 
+            print("SHOW TARGET", i)
         img, bboxes = mnistgen.generate(target) 
         img = tfm(img).to(device) 
         #target = torch.zeros() 
@@ -134,15 +171,38 @@ for episode in range(episode_count):
         out = expander(o, to_img_shape=False) 
 
         loss = empty_bceloss(out, torch.zeros_like(out))  # since it's all supposed to be 0. 
-        loss.backward(retain_graph=True) # not updating weights yet, just adding to gradients 
+        loss = loss*loss_factor 
+
+        # make copy 
+        h = h.detach().clone() 
+        o = o.detach().clone() 
+        h_c = [i.detach().clone() for i in h_c] 
+        o_c = [i.detach().clone() for i in o_c] 
+
+
+        loss.backward() 
         
         losses.append(loss.item())
         del loss 
 
+        if debug: 
+            print("GRADS:", np.abs(extractor.dense.weight.grad.cpu().numpy().mean()) 
+                , np.abs(expander.layers[0].weight.grad.cpu().numpy().mean())
+                , np.abs(expander.layers[-1].weight.grad.cpu().numpy().mean()) )
+
+        optimizer.step() 
+
         torch.cuda.empty_cache()
+
 
     # wait 
     for i in range(target_delay): 
+        optimizer.zero_grad() 
+        torch.cuda.empty_cache()
+
+        if debug: 
+            print("WAIT", i) 
+
         img = tfm(mnistgen.get_empty_image()).to(device) 
         #target = torch.zeros() 
 
@@ -151,47 +211,92 @@ for episode in range(episode_count):
         out = expander(o, to_img_shape=False) 
 
         loss = empty_bceloss(out, torch.zeros_like(out))  # since it's all supposed to be 0. 
-        loss.backward(retain_graph=True) # not updating weights yet, just adding to gradients 
+        loss = loss*loss_factor 
+
+        # make copy 
+        h = h.detach().clone() 
+        o = o.detach().clone() 
+        h_c = [i.detach().clone() for i in h_c] 
+        o_c = [i.detach().clone() for i in o_c] 
+
+        loss.backward() 
         
         losses.append(loss.item())
         del loss 
-        
+
+        if debug: 
+            print("GRADS:", np.abs(extractor.dense.weight.grad.cpu().numpy().mean()) 
+                , np.abs(expander.layers[0].weight.grad.cpu().numpy().mean())
+                , np.abs(expander.layers[-1].weight.grad.cpu().numpy().mean()) )
+
+        optimizer.step() 
         torch.cuda.empty_cache()
 
 
     # show choices 
     bceloss = nn.BCELoss(reduction='none') 
     for i in range(target_display): 
+        optimizer.zero_grad() 
+        torch.cuda.empty_cache()
+
+        if debug: 
+            print("SHOW CHOICES", i)
+
         img, bboxes = mnistgen.generate(target, options) 
         img = tfm(img).to(device) 
         
         train_target = torch.zeros_like(img) 
         weights = torch.zeros_like(img, requires_grad=False) + 0.01 # don't care that much about mistakes outside 
         t_bbox = bboxes[0] 
-        train_target[t_bbox[0]:t_bbox[2], t_bbox[1]:t_bbox[3]] = 1 
-        weights[t_bbox[0]:t_bbox[2], t_bbox[1]:t_bbox[3]] = 1 
+        v = 1/((t_bbox[2]-t_bbox[0])*(t_bbox[3]-t_bbox[1]))
+        train_target[t_bbox[0]:t_bbox[2], t_bbox[1]:t_bbox[3]] = v 
+        weights[t_bbox[0]:t_bbox[2], t_bbox[1]:t_bbox[3]] = v 
         for bbox in bboxes[1:]: 
-            weights[bbox[0]:bbox[2], bbox[1]:bbox[3]] = 1 
+            weights[bbox[0]:bbox[2], bbox[1]:bbox[3]] = v 
         
         train_target = train_target.flatten() # "fake" it as batched data to use weights 
         weights = weights.reshape(-1,1) 
 
         in_emb = extractor(img) 
         h, o, h_c, o_c = lwn(in_emb, h, o, h_c, o_c) 
-        out = expander(o, to_img_shape=False) 
+        out = expander(o, to_img_shape=False)
+        #print("OUT SHAPE:", out.shape)
+        #print("BCELOSS", no_reduction_bceloss(out, torch.zeros_like(out)))
+        #print("BCELOSS SHAPE", no_reduction_bceloss(out, torch.zeros_like(out)).shape)
+        #print("WS SHAPE", weights.shape)
 
-        loss = empty_bceloss(out, torch.zeros_like(out)) @ weights # since it's all supposed to be 0. 
-        loss.backward(retain_graph=True) # not updating weights yet, just adding to gradients 
+        loss = no_reduction_bceloss(out, torch.zeros_like(out)) @ weights # since it's all supposed to be 0. 
+        #print("LOSS:", loss)
+        loss = loss*loss_factor 
+
+        # make copy 
+        h = h.detach().clone() 
+        o = o.detach().clone() 
+        h_c = [i.detach().clone() for i in h_c] 
+        o_c = [i.detach().clone() for i in o_c] 
+
+        loss.backward() 
         
         losses.append(loss.item())
         del loss 
-        
-        torch.cuda.empty_cache()
 
-    optimizer.step() 
+        if debug: 
+            print("GRADS:", np.abs(extractor.dense.weight.grad.cpu().numpy().mean()) 
+                , np.abs(expander.layers[0].weight.grad.cpu().numpy().mean())
+                , np.abs(expander.layers[-1].weight.grad.cpu().numpy().mean()) )
+        
+        optimizer.step() 
+
+        torch.cuda.empty_cache()
+        
+    
+    # exponentially decay learning rates 
+    for g in optimizer.param_groups: 
+        g['lr'] *= 0.996 
 
     print("EPISODE AVG LOSS:", sum(losses)/len(losses)) 
     print("PREDICTION AVG LOSS:", sum(losses[-target_display:])/target_display)
+    print() 
 
 
 
